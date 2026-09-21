@@ -34,3 +34,6 @@ coverage/
 .vite/
 .turbo/
 *.tsbuildinfo
+
+# WAL 沙盒运行时数据
+sandbox-data/

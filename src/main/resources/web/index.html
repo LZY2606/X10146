@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WAL 恢复沙盒</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171d26; --panel2: #1e2632; --line: #2b3647;
+    --text: #e6edf3; --muted: #8b98a9; --accent: #4da3ff; --good: #3fb950;
+    --bad: #f85149; --warn: #d29922; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { padding: 14px 22px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap; background: var(--panel); }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  select, input, button, textarea { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 13px; }
+  button { cursor: pointer; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button.primary:hover { background: #388bfd; }
+  button.warn { background: #5a2b2b; border-color: #8a3a3a; color: #ffd7d5; }
+  button:hover { border-color: var(--accent); }
+  main { display: grid; grid-template-columns: 380px 1fr 1fr; gap: 14px; padding: 14px 22px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; min-width: 0; }
+  .panel h2 { font-size: 14px; margin: 0 0 10px; color: var(--accent); }
+  .row { display: flex; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+  .row label { color: var(--muted); font-size: 12px; }
+  .script { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow: auto; }
+  .script li { display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+    border-radius: 6px; font-family: var(--mono); font-size: 12px; }
+  .script li:nth-child(odd) { background: var(--panel2); }
+  .script li .idx { color: var(--muted); width: 26px; text-align: right; }
+  .script li button { margin-left: auto; padding: 1px 7px; font-size: 11px; }
+  .tag { font-size: 10px; padding: 1px 6px; border-radius: 9px; }
+  .tag.txn { background: #173b5a; color: #9fd0ff; }
+  .tag.ckpt { background: #3a2f17; color: #e3c374; }
+  pre { background: #0b0f14; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; font: 11px/1.45 var(--mono); overflow: auto; margin: 0;
+    color: #c9d4e0; max-height: 340px; white-space: pre; }
+  .kv { font-family: var(--mono); font-size: 12px; }
+  .kv table { border-collapse: collapse; width: 100%; }
+  .kv td, .kv th { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+  .kv th { color: var(--muted); font-weight: 500; }
+  .ok { color: var(--good); } .err { color: var(--bad); } .warn { color: var(--warn); }
+  .log { font-family: var(--mono); font-size: 11.5px; max-height: 240px; overflow: auto;
+    white-space: pre-wrap; color: #b8c4d1; }
+  .log .g { color: var(--good); } .log .r { color: var(--bad); } .log .y { color: var(--warn); }
+  .log .b { color: var(--accent); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .framegrid { display: grid; grid-template-columns: repeat(1, 1fr); gap: 10px; }
+  details summary { cursor: pointer; color: var(--muted); margin: 6px 0; }
+  .switch { display: flex; align-items: center; gap: 6px; }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); }
+  @media (max-width: 1200px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>WAL 恢复沙盒</h1>
+  <span class="sub">write-ahead log 崩溃语义 · 本地沙盒</span>
+  <select id="experiments" style="min-width:220px"></select>
+  <button id="newExp">+ 新实验</button>
+  <button id="importBtn">导入 zip</button>
+  <input type="file" id="importFile" accept=".zip" style="display:none">
+  <a id="exportLink" href="#" style="display:none"></a>
+  <button id="exportBtn">导出 zip</button>
+  <button id="deleteExp" class="warn">删除</button>
+</header>
+
+<main>
+  <!-- 左：事务编辑器 -->
+  <section class="panel">
+    <h2>① 事务编辑器（记录按事件顺序追加）</h2>
+    <div class="row">
+      <label>事务</label>
+      <input id="txn" value="t1" style="width:60px">
+      <select id="op">
+        <option value="BEGIN">begin</option>
+        <option value="PUT">put</option>
+        <option value="DELETE">delete</option>
+        <option value="COMMIT">commit</option>
+        <option value="CHECKPOINT">checkpoint</option>
+      </select>
+    </div>
+    <div class="row" id="keyRow">
+      <label>键</label><input id="key" value="a" style="width:90px">
+    </div>
+    <div class="row" id="valRow">
+      <label>值</label><input id="value" value="1" style="width:90px">
+    </div>
+    <div class="row">
+      <button class="primary" id="appendOne">追加一条并落盘</button>
+      <button id="appendAll">批量执行全部脚本</button>
+    </div>
+    <ol class="script" id="script"></ol>
+    <div class="muted" id="revInfo"></div>
+  </section>
+
+  <!-- 中：故障开关 + 帧字节 -->
+  <section class="panel">
+    <h2>② 帧与原始字节</h2>
+    <div class="row">
+      <label class="switch"><input type="checkbox" id="crash"> 模拟掉电</label>
+    </div>
+    <div class="row">
+      <label>崩溃点</label>
+      <select id="anchor" style="max-width:150px">
+        <option value="NONE">不掉电</option>
+        <option value="AFTER_EVENT">在某事件之后</option>
+        <option value="AFTER_RECORDS">在 N 条完整记录后</option>
+        <option value="AFTER_BYTES">在 B 字节之后</option>
+        <option value="CKPT_PHASE">checkpoint 某阶段</option>
+      </select>
+      <select id="eventSelect" style="max-width:120px"></select>
+      <input id="numValue" type="number" value="1" style="width:64px" title="N 或 B">
+    </div>
+    <div class="row">
+      <label>checkpoint 阶段</label>
+      <select id="stage" style="max-width:200px">
+        <option value="TEMP_WRITTEN">阶段1 临时文件写入</option>
+        <option value="TEMP_SYNCED">阶段2 临时文件 fsync</option>
+        <option value="REPLACED">阶段3 原子替换</option>
+        <option value="CKPT_LOGGED">阶段4 写日志标记</option>
+        <option value="ROTATED">阶段5 轮转完成</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>故障开关（仅影响选定写入）</label>
+    </div>
+    <div class="row">
+      <select id="fault" style="max-width:140px">
+        <option value="NONE">无故障</option>
+        <option value="SHORT_WRITE">短写</option>
+        <option value="TRAIL_GARBAGE">尾部垃圾</option>
+        <option value="BIT_FLIP">位翻转</option>
+        <option value="UNKNOWN_TYPE">未知类型</option>
+        <option value="CKPT_INTERRUPT">checkpoint 中断</option>
+      </select>
+      <select id="faultTarget" style="max-width:120px"></select>
+      <input id="faultParam" type="number" value="24" style="width:64px"
+             title="短写字节数 / 垃圾长度 / 临时文件部分字节数">
+    </div>
+    <div class="row">
+      <button class="primary" id="run">⚡ 模拟并落盘</button>
+      <button id="recover">🔁 重启恢复</button>
+    </div>
+    <div class="framegrid" id="frames"></div>
+  </section>
+
+  <!-- 右：恢复结果 -->
+  <section class="panel">
+    <h2>③ 恢复结果与依据</h2>
+    <div id="crashInfo" class="muted"></div>
+    <details open><summary>恢复判定依据</summary><div class="log" id="diag"></div></details>
+    <details><summary>落盘/恢复执行轨迹</summary><div class="log" id="trace"></div></details>
+    <details open><summary>恢复后键值 vs 预期状态</summary>
+      <div id="matchInfo" class="muted"></div>
+      <div class="row kv" style="display:flex; gap:16px">
+        <div style="flex:1"><div class="muted">恢复后</div><div id="recoveredKv"></div></div>
+        <div style="flex:1"><div class="muted">预期（无崩溃完整运行）</div><div id="expectedKv"></div></div>
+      </div>
+    </details>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
