@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WAL 恢复沙盒</title>
+<style>
+:root {
+  --bg: #0f1420;
+  --panel: #171e2e;
+  --panel2: #1d2638;
+  --border: #2b3650;
+  --text: #e6ebf5;
+  --muted: #8a97b2;
+  --accent: #4f8cff;
+  --green: #38c172;
+  --red: #ff5c69;
+  --amber: #ffb547;
+  --violet: #a78bfa;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+header {
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: linear-gradient(180deg, #18203200, #18203255);
+}
+header h1 { font-size: 18px; margin: 0; }
+header .sub { color: var(--muted); font-size: 12px; }
+.layout { display: grid; grid-template-columns: 240px 1fr 380px; gap: 14px; padding: 14px; }
+@media (max-width: 1280px) { .layout { grid-template-columns: 210px 1fr; } .rightcol { grid-column: 1 / -1; } }
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.panel h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+button {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { border-color: var(--red); color: var(--red); }
+button.small { padding: 3px 8px; font-size: 12px; }
+input, select, textarea {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  width: 100%;
+  font-family: inherit;
+}
+label { font-size: 12px; color: var(--muted); display: block; margin: 8px 0 3px; }
+.row { display: flex; gap: 8px; }
+.row > * { flex: 1; }
+.exp-item {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.exp-item.active { border-color: var(--accent); background: #20304f; }
+.exp-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+.mono { font-family: var(--mono); }
+.tag { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+.tag.BEGIN { background: #26344f; color: #8fb3ff; }
+.tag.PUT { background: #143a26; color: #7ee0a5; }
+.tag.DELETE { background: #3d1e24; color: #ff95a0; }
+.tag.COMMIT { background: #2b3a16; color: #b6e36b; }
+.tag.CHECKPOINT { background: #2d2145; color: #c4b0ff; }
+.tag.fault { background: #4a2f10; color: var(--amber); margin-left: 4px; }
+.hex {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+.step {
+  border-left: 3px solid var(--border);
+  padding: 7px 10px;
+  margin: 6px 0;
+  background: var(--panel2);
+  border-radius: 0 7px 7px 0;
+}
+.step.snapshot { border-color: var(--violet); }
+.step.segment, .step.chain { border-color: var(--accent); }
+.step.commit { border-color: var(--green); }
+.step.abort, .step.discard, .step.terminal, .step.error { border-color: var(--red); }
+.step.checkpoint-frame { border-color: var(--amber); }
+.step .t { font-weight: 600; font-size: 12.5px; }
+.step .d { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.kvchip { font-family: var(--mono); font-size: 11px; color: #9fd3ff; margin-top: 3px; }
+.status-banner {
+  padding: 10px 12px;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+.status-banner.ok { background: #13351f; border-color: #2c6b43; }
+.status-banner.warn { background: #3d2f10; border-color: #8a6520; }
+.status-banner.err { background: #3a1620; border-color: #8e2d3d; }
+.tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+.tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+pre.dump {
+  background: #0b101c;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: #b9c7e6;
+  overflow: auto;
+  max-height: 420px;
+  margin: 0;
+}
+.kvgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.kvbox { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.kvbox h3 { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
+.miss { color: var(--red); }
+.hint { color: var(--muted); font-size: 11.5px; margin-top: 4px; line-height: 1.5; }
+.flash { position: fixed; bottom: 16px; right: 16px; background: var(--panel2); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; display: none; max-width: 360px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>WAL 恢复沙盒</h1>
+  <span class="sub">write-ahead log 崩溃语义本地沙盒 · 长度/类型/事务号/序号/CRC32 帧 · 掉电前缀恢复</span>
+</header>
+
+<div class="layout">
+  <div class="leftcol">
+    <div class="panel">
+      <h2>实验</h2>
+      <div class="row" style="margin-bottom:8px">
+        <input id="newExpName" placeholder="新实验名称">
+        <button class="primary" onclick="createExp()">新建</button>
+      </div>
+      <div id="expList"></div>
+    </div>
+    <div class="panel">
+      <h2>导入 / 导出</h2>
+      <button style="width:100%;margin-bottom:6px" onclick="exportExp()">导出实验 ZIP（含原始字节）</button>
+      <label class="hint">导入后在空实例恢复，应得到完全相同的恢复轨迹：</label>
+      <input type="file" id="importFile" accept=".zip">
+      <button style="width:100%;margin-top:6px" onclick="importExp()">导入 ZIP</button>
+    </div>
+  </div>
+
+  <div class="midcol">
+    <div class="panel">
+      <h2>追加事务记录</h2>
+      <div class="row">
+        <div>
+          <label>记录类型</label>
+          <select id="recType" onchange="onTypeChange()">
+            <option value="BEGIN">BEGIN</option>
+            <option value="PUT">PUT</option>
+            <option value="DELETE">DELETE</option>
+            <option value="COMMIT">COMMIT</option>
+            <option value="CHECKPOINT">CHECKPOINT</option>
+          </select>
+        </div>
+        <div id="keyWrap"><label>键</label><input id="recKey" placeholder="key"></div>
+        <div id="valWrap" style="flex:1.4"><label>值</label><input id="recValue" placeholder="value"></div>
+        <div style="max-width:90px"><label>&nbsp;</label><button class="primary" style="width:100%" onclick="addEvent()">追加</button></div>
+      </div>
+      <div class="hint" id="txnHint"></div>
+    </div>
+
+    <div class="panel">
+      <h2>故障开关（仅作用于选定写入）</h2>
+      <div class="row">
+        <div>
+          <label>故障类型</label>
+          <select id="faultKind" onchange="faultUi()">
+            <option value="NONE">无故障</option>
+            <option value="SHORT_WRITE">短写（截断尾部字节）</option>
+            <option value="GARBAGE">尾部垃圾（帧后随机字节）</option>
+            <option value="BIT_FLIP">位翻转（破坏 CRC）</option>
+            <option value="CP_INTERRUPT">checkpoint 中断</option>
+          </select>
+        </div>
+        <div id="fBytesWrap"><label>字节数</label><input id="faultBytes" type="number" value="5" min="1"></div>
+        <div id="fOffWrap"><label>帧内字节偏移</label><input id="faultOffset" type="number" value="0" min="0"></div>
+        <div id="fBitWrap"><label>位 0-7</label><input id="faultBit" type="number" value="0" min="0" max="7"></div>
+        <div id="fPhaseWrap"><label>中断阶段</label>
+          <select id="faultPhase">
+            <option value="TEMP_CREATED">临时文件已创建</option>
+            <option value="TEMP_SYNCED">临时文件已同步</option>
+            <option value="RENAMED">已替换未同步目录</option>
+          </select>
+        </div>
+        <div style="max-width:120px"><label>目标事件</label>
+          <select id="faultEvent"></select>
+        </div>
+        <div style="max-width:90px"><label>&nbsp;</label><button style="width:100%" onclick="applyFault()">挂上故障</button></div>
+      </div>
+      <div class="hint">故障只在“模拟掉电”重建时生效；点“恢复供电（清空故障）”后后续实验完全干净，互不污染。</div>
+    </div>
+
+    <div class="panel">
+      <h2>崩溃点</h2>
+      <div class="row">
+        <div style="max-width:210px">
+          <label>模式</label>
+          <select id="crashMode" onchange="crashUi()">
+            <option value="NONE">不掉电（完整追加）</option>
+            <option value="AFTER_EVENT">在指定记录之后掉电</option>
+            <option value="AT_BYTE">在指定字节之后掉电</option>
+          </select>
+        </div>
+        <div id="crashEventWrap"><label>事件 #</label><select id="crashEvent"></select></div>
+        <div id="crashByteWrap"><label>字节偏移（跨所有段累计）</label><input id="crashByte" type="number" value="0" min="0"></div>
+      </div>
+      <div style="margin-top:10px" class="row">
+        <button class="primary" onclick="materialize()">应用追加 / 模拟掉电（重建磁盘）</button>
+        <button style="background:#173b26;border-color:#2c6b43" onclick="recover()">重启恢复（扫描落盘前缀）</button>
+        <button onclick="resetPower()">恢复供电（清空故障）</button>
+      </div>
+      <div id="matBanner"></div>
+    </div>
+
+    <div class="panel">
+      <h2>日志记录（内存中的编辑视图）</h2>
+      <div style="overflow-x:auto"><table id="eventTable"></table></div>
+    </div>
+  </div>
+
+  <div class="rightcol">
+    <div class="panel">
+      <h2>落盘文件与十六进制帧</h2>
+      <div id="fileList"></div>
+      <div id="hexArea"></div>
+    </div>
+    <div class="panel">
+      <h2>键值对照</h2>
+      <div class="kvgrid">
+        <div class="kvbox"><h3>恢复后 K/V</h3><div id="recoveredKv" class="mono"></div></div>
+        <div class="kvbox"><h3>预期（全部提交）K/V</h3><div id="expectedKv" class="mono"></div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>恢复依据（逐步）</h2>
+      <div id="recoverySteps"><div class="hint">尚未运行恢复。</div></div>
+    </div>
+  </div>
+</div>
+<div class="flash" id="flash"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
